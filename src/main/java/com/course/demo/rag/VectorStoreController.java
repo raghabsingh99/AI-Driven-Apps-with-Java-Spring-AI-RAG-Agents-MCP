@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
@@ -33,7 +34,7 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class VectorStoreController {
 
-    private static final int EXCERPT_MAX_LENGTH = 200;
+    private static final int EXCERPT_MAX_LENGTH = 300;
 
     private final VectorStore vectorStore;
     private final Resource[] ragDocumentResources;
@@ -128,7 +129,11 @@ public class VectorStoreController {
     }
 
     // Ingests every reference .txt file under src/main/resources/rag (see VectorStoreConfig's
-    // ragDocumentResources bean) into the VectorStore, one Document per file.
+    // ragDocumentResources bean) into the VectorStore, one Document per file. Each document's id
+    // is deterministically derived from its filename (instead of the usual random UUID), so
+    // re-running this is idempotent: MariaDBVectorStore.add() issues an upsert
+    // (INSERT ... ON DUPLICATE KEY UPDATE keyed on id), so re-ingesting the same file overwrites
+    // its existing row in place rather than inserting a duplicate one.
     @PostMapping(path = "/ingest", produces = MediaType.APPLICATION_JSON_VALUE)
     public List<IngestedDocumentResponse> ingest() throws IOException {
         List<Document> documents = new ArrayList<>();
@@ -136,15 +141,15 @@ public class VectorStoreController {
 
         for (Resource resource : ragDocumentResources) {
             ParsedDocument parsed = extractTitleAndContent(resource);
-            String topic = topicFromFilename(resource.getFilename());
+            String filename = resource.getFilename();
+            String topic = topicFromFilename(filename);
+            String id = UUID.nameUUIDFromBytes(filename.getBytes(StandardCharsets.UTF_8)).toString();
 
-            // Makes re-ingestion idempotent: drop any rows already stored under this topic
-            // (from a prior /ingest call, or an overlapping seeded sample document) before
-            // adding the fresh one, instead of piling up duplicates on every call.
-            vectorStore.delete(new FilterExpressionBuilder().eq("topic", topic).build());
-
-            Document document = new Document(parsed.content(),
-                    Map.of("title", parsed.title(), "topic", topic, "source", parsed.source()));
+            Document document = Document.builder()
+                    .id(id)
+                    .text(parsed.content())
+                    .metadata(Map.of("title", parsed.title(), "topic", topic, "source", parsed.source()))
+                    .build();
             documents.add(document);
             responses.add(IngestedDocumentResponse.builder()
                     .id(document.getId())
